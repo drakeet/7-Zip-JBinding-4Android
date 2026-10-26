@@ -1,0 +1,125 @@
+name: Pure Writer Android AAR
+
+# Builds the AAR that Pure Writer for Android ships: classes.jar plus lib7-Zip-JBinding.so for armeabi-v7a, arm64-v8a,
+# x86 and x86_64, laid out like the AAR that the Gradle build of this repository produces (assets, empty consumer
+# rules, empty R.txt). Assembled by hand with javac, the NDK's CMake and zip, so no Gradle plugin or Maven dependency
+# is downloaded. Every library is stripped and checked for 16 KB aligned LOAD segments, a static C++ runtime and the
+# exported JNI entry point; the committed JNI header must match the one javac generates.
+#
+# Manual only, read-only token, no secrets; actions are pinned to commit SHAs.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 28.2.13676358
+  CMAKE_VERSION: 3.22.1
+
+jobs:
+  aar:
+    name: AAR (four ABIs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install NDK, CMake and platform
+        run: |
+          set -eux
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" "platforms;android-36" > /dev/null
+
+      - name: Compile Java and check the JNI header
+        run: |
+          set -eux
+          mkdir -p build/classes build/headers build/aar
+          find sevenzipjbinding/src/main/java -name '*.java' | sort > build/sources.txt
+          javac -nowarn -source 8 -target 8 -encoding UTF-8 \
+            -classpath "$ANDROID_HOME/platforms/android-36/android.jar" \
+            -h build/headers -d build/classes @build/sources.txt
+          # The native build uses the committed header; it must declare every native method of the Java classes.
+          cmp build/headers/net_sf_sevenzipjbinding_impl_OutArchiveImpl.h \
+            sevenzipjbinding/src/main/cpp/jbinding-cpp/javah/net_sf_sevenzipjbinding_impl_OutArchiveImpl.h
+          jar cf build/aar/classes.jar -C build/classes .
+          unzip -l build/aar/classes.jar | grep -q 'net/sf/sevenzipjbinding/IOutFeatureSetDictionarySize.class'
+
+      - name: Build, strip and check four ABIs
+        run: |
+          set -eux
+          sdk_cmake="$ANDROID_HOME/cmake/$CMAKE_VERSION/bin"
+          ndk="$ANDROID_HOME/ndk/$NDK_VERSION"
+          llvm="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            "$sdk_cmake/cmake" -S sevenzipjbinding -B "build/$abi" -G Ninja \
+              -DCMAKE_MAKE_PROGRAM="$sdk_cmake/ninja" \
+              -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-21 -DANDROID_STL=c++_static \
+              -DCMAKE_BUILD_TYPE=Release
+            "$sdk_cmake/cmake" --build "build/$abi" --parallel 4
+            mkdir -p "build/aar/jni/$abi"
+            library="build/aar/jni/$abi/lib7-Zip-JBinding.so"
+            "$llvm/llvm-strip" --strip-unneeded -o "$library" "build/$abi/lib7-Zip-JBinding.so"
+            "$llvm/llvm-readelf" -lW "$library" | tee "build/$abi-program-headers.txt"
+            "$llvm/llvm-readelf" -dW "$library" | tee "build/$abi-dynamic.txt"
+            "$llvm/llvm-nm" -D --defined-only "$library" > "build/$abi-symbols.txt"
+            python3 - "$abi" "build/$abi-program-headers.txt" "build/$abi-dynamic.txt" "build/$abi-symbols.txt" <<'PY'
+          import sys
+          abi, headers, dynamic, symbols = sys.argv[1:]
+          loads = [line.split() for line in open(headers) if line.lstrip().startswith("LOAD ")]
+          assert loads, "no LOAD segments"
+          for load in loads:
+              offset, address, alignment = int(load[1], 16), int(load[2], 16), int(load[-1], 16)
+              assert alignment >= 0x4000 and (address - offset) % 0x4000 == 0, load
+          assert "libc++_shared.so" not in open(dynamic).read(), "C++ runtime must be static"
+          exported = [line.split()[-1] for line in open(symbols)]
+          assert "Java_net_sf_sevenzipjbinding_impl_OutArchiveImpl_nativeSetProperties" in exported
+          print(f"{abi}: {len(loads)} LOAD segments aligned to 16 KB, JNI entry point exported")
+          PY
+          done
+
+      - name: Assemble AAR
+        run: |
+          set -eux
+          cd build/aar
+          cat > AndroidManifest.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="net.sf.sevenzipjbinding" >
+
+              <uses-sdk android:minSdkVersion="21" />
+
+          </manifest>
+          XML
+          cp ../../sevenzipjbinding/consumer-rules.pro proguard.txt
+          : > R.txt
+          cp -R ../../sevenzipjbinding/src/main/assets assets
+          mkdir -p META-INF/com/android/build/gradle
+          printf 'aarFormatVersion=1.0\naarMetadataVersion=1.0\nminCompileSdk=1\nminCompileSdkExtension=0\nminAndroidGradlePluginVersion=1.0.0\n' \
+            > META-INF/com/android/build/gradle/aar-metadata.properties
+          mkdir ../../dist
+          zip -X -r ../../dist/sevenzipjbinding-release.aar AndroidManifest.xml R.txt proguard.txt classes.jar \
+            jni assets META-INF
+          cd ../../dist
+          unzip -l sevenzipjbinding-release.aar
+          sha256sum *.aar > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-aar
+          path: dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-checks
+          path: build/*-*.txt
+          if-no-files-found: error
