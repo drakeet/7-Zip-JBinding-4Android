@@ -10,10 +10,10 @@ extern "C" {
 /*
  * Class:     net_sf_sevenzipjbinding_impl_OutArchiveImpl
  * Method:    nativeSetProperties
- * Signature: (IIILjava/lang/String;Z)V
+ * Signature: (IIILjava/lang/String;ZLjava/lang/String;)V
  */
 JNIEXPORT void JNICALL Java_net_sf_sevenzipjbinding_impl_OutArchiveImpl_nativeSetProperties
-  (JNIEnv *, jobject, jint, jint, jint, jstring, jboolean);
+  (JNIEnv *, jobject, jint, jint, jint, jstring, jboolean, jstring);
 
 /*
  * Class:     net_sf_sevenzipjbinding_impl_OutArchiveImpl
