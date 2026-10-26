@@ -6,9 +6,13 @@ name: Pure Writer Android AAR
 # is downloaded. Every library is stripped and checked for 16 KB aligned LOAD segments, a static C++ runtime and the
 # exported JNI entry point; the committed JNI header must match the one javac generates.
 #
-# Manual only, read-only token, no secrets; actions are pinned to commit SHAs.
+# Runs on pushes to the purewriter-* release branches and pw-* tags, or manually. Read-only token, no secrets;
+# actions are pinned to commit SHAs.
 on:
   workflow_dispatch:
+  push:
+    branches: ['purewriter-*']
+    tags: ['pw-*']
 
 permissions:
   contents: read
